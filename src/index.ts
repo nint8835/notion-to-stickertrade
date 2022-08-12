@@ -114,7 +114,6 @@ async function listNotionStickers(
     }
   }
 
-  console.log("Fetching sticker details from Notion...");
   const progressBar = new cliProgress.MultiBar(
     {},
     cliProgress.Presets.shades_classic
@@ -133,6 +132,8 @@ async function listNotionStickers(
     }
     progressBarInst.increment();
   }
+  progressBarInst.stop();
+  progressBar.stop();
   return stickerData;
 }
 
@@ -188,14 +189,22 @@ async function createStickerTradeSticker(
 }
 
 async function main() {
+  console.log("Fetching current stickers from stickertrade...");
   const stickerTradeStickers = await listStickerTradeStickers();
 
+  console.log("Fetching sticker details from Notion...");
   const notionStickers = await listNotionStickers(stickerTradeStickers);
+
+  if (notionStickers.length === 0) {
+    console.log("No stickers to add");
+    return;
+  }
+
+  console.log("Creating stickers on stickertrade...");
   const progressBar = new cliProgress.SingleBar(
     {},
     cliProgress.Presets.shades_classic
   );
-
   progressBar.start(notionStickers.length, 0);
 
   for (const sticker of notionStickers) {
