@@ -130,7 +130,6 @@ async function listNotionStickers(
     );
     if (stickerInfo) {
       stickerData.push(stickerInfo);
-      break;
     }
     progressBarInst.increment();
   }
@@ -192,7 +191,17 @@ async function main() {
   const stickerTradeStickers = await listStickerTradeStickers();
 
   const notionStickers = await listNotionStickers(stickerTradeStickers);
-  await createStickerTradeSticker(notionStickers[0]);
+  const progressBar = new cliProgress.SingleBar(
+    {},
+    cliProgress.Presets.shades_classic
+  );
+
+  progressBar.start(notionStickers.length, 0);
+
+  for (const sticker of notionStickers) {
+    await createStickerTradeSticker(sticker);
+    progressBar.increment();
+  }
 }
 
 main()
