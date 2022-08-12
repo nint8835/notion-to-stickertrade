@@ -41,6 +41,19 @@ async function main() {
       throw new Error("title is not a title");
     }
 
+    const countResponse = await notion.pages.properties.retrieve({
+      page_id: dbPage.id,
+      property_id: process.env.NOTION_COUNT_PROPERTY_ID!,
+    });
+    if (countResponse.type !== "number") {
+      throw new Error("count is not a property item");
+    }
+
+    const title = titleObject.title.plain_text;
+    const count = countResponse.number;
+    console.log(`${title}: ${count}`);
+  
+
     const blocks = await notion.blocks.children.list({
       block_id: dbPage.id,
     });
