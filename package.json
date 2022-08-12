@@ -16,7 +16,8 @@
   "dependencies": {
     "@notionhq/client": "^2.1.1",
     "cli-progress": "^3.11.2",
-    "dotenv": "^16.0.1"
+    "dotenv": "^16.0.1",
+    "node-fetch": "^2.6.7"
   },
   "devDependencies": {
     "@types/cli-progress": "^3.11.0",
