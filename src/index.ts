@@ -5,7 +5,8 @@ import {
 } from "@notionhq/client/build/src/api-endpoints";
 import dotenv from "dotenv";
 import cliProgress from "cli-progress";
-import fetch from "node-fetch";
+import fetch, { FormData } from "node-fetch";
+import { randomUUID } from "crypto";
 
 dotenv.config();
 
@@ -129,6 +130,7 @@ async function listNotionStickers(
     );
     if (stickerInfo) {
       stickerData.push(stickerInfo);
+      break;
     }
     progressBarInst.increment();
   }
@@ -161,10 +163,36 @@ async function listStickerTradeStickers(): Promise<Set<string>> {
   return stickers;
 }
 
+async function createStickerTradeSticker(
+  info: NotionStickerInfo
+): Promise<void> {
+  const imageResp = await fetch(info.imageUrl);
+  const imageBlob = await imageResp.blob();
+
+  const formData = new FormData();
+  formData.append("name", info.title);
+  formData.append("image", imageBlob, `${randomUUID()}.jpg`);
+
+  const resp = await fetch(
+    "https://stickertrade.ca/upload-sticker?_data=routes%2Fupload-sticker",
+    {
+      method: "POST",
+      headers: {
+        Cookie: `RJ_session=${process.env.STICKERTRADE_COOKIE!}`,
+      },
+      body: formData,
+    }
+  );
+  if (!resp.ok) {
+    throw new Error("Failed to create sticker");
+  }
+}
+
 async function main() {
   const stickerTradeStickers = await listStickerTradeStickers();
 
   const notionStickers = await listNotionStickers(stickerTradeStickers);
+  await createStickerTradeSticker(notionStickers[0]);
 }
 
 main()
