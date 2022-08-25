@@ -44,6 +44,10 @@ async function getNotionStickerInfo(
     return null;
   }
 
+  if (title.length > 60) {
+    throw new Error(`Sticker ${title} has too long of title (> 60 chars)`);
+  }
+
   const countResponse = await notion.pages.properties.retrieve({
     page_id: pageId,
     property_id: process.env.NOTION_COUNT_PROPERTY_ID!,
@@ -184,7 +188,7 @@ async function createStickerTradeSticker(
     }
   );
   if (!resp.ok) {
-    throw new Error("Failed to create sticker");
+    throw new Error(`Failed to create sticker: ${await resp.text()}`);
   }
 }
 
