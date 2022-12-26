@@ -15,7 +15,7 @@
   "keywords": [],
   "author": "",
   "dependencies": {
-    "@notionhq/client": "^2.2.2",
+    "@notionhq/client": "^2.2.3",
     "cli-progress": "^3.11.2",
     "dotenv": "^16.0.3",
     "node-fetch": "^3.3.0"
