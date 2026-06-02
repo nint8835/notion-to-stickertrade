@@ -1,7 +1,7 @@
 import { Client, isFullPage } from "@notionhq/client";
 import type {
+  ImageBlockObjectResponse,
   PageObjectResponse,
-  PartialPageObjectResponse,
   QueryDataSourceResponse,
 } from "@notionhq/client";
 import dotenv from "dotenv";
@@ -12,15 +12,15 @@ dotenv.config();
 
 type NotionStickerInfo = {
   title: string;
-  count: number;
-  excluded: boolean;
-  imageUrl: string | null;
+  url: string;
 };
 
 type StickerTradeMode = "mock" | "live";
 
 const stickerTradeMode: StickerTradeMode =
   process.env.STICKERTRADE_MODE === "live" ? "live" : "mock";
+const notionVersion = "2026-03-11";
+const stickerCandidateLimit = 20;
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -33,6 +33,7 @@ function requiredEnv(name: string): string {
 function createNotionClient(): Client {
   return new Client({
     auth: requiredEnv("NOTION_TOKEN"),
+    notionVersion,
   });
 }
 
@@ -64,36 +65,23 @@ async function getNotionDataSourceId(notion: Client): Promise<string> {
   return dataSourceId;
 }
 
-function getImageUrl(image: unknown): string | null {
-  if (
-    typeof image === "object" &&
-    image !== null &&
-    "type" in image &&
-    image.type === "file" &&
-    "file" in image &&
-    typeof image.file === "object" &&
-    image.file !== null &&
-    "url" in image.file &&
-    typeof image.file.url === "string"
-  ) {
-    return image.file.url;
+type ImageMedia = ImageBlockObjectResponse["image"];
+type UrlMedia = Extract<ImageMedia, { type: "file" | "external" }>;
+
+function isUrlMedia(media: ImageMedia): media is UrlMedia {
+  return media.type === "file" || media.type === "external";
+}
+
+function getMediaUrl(media: ImageMedia): string | null {
+  if (!isUrlMedia(media)) {
+    return null;
   }
 
-  if (
-    typeof image === "object" &&
-    image !== null &&
-    "type" in image &&
-    image.type === "external" &&
-    "external" in image &&
-    typeof image.external === "object" &&
-    image.external !== null &&
-    "url" in image.external &&
-    typeof image.external.url === "string"
-  ) {
-    return image.external.url;
+  if (media.type === "file") {
+    return media.file.url;
   }
 
-  return null;
+  return media.external.url;
 }
 
 type PageProperty = PageObjectResponse["properties"][string];
@@ -155,6 +143,29 @@ function getExcluded(page: PageObjectResponse): boolean {
   return excludedProperty.checkbox;
 }
 
+async function getBlockImageUrl(notion: Client, page: PageObjectResponse) {
+  const blocks = await notion.blocks.children.list({
+    block_id: page.id,
+  });
+  const imageBlock = blocks.results[0];
+  if (!("type" in imageBlock)) {
+    throw new Error("first block is a partial");
+  }
+  if (imageBlock.type !== "image") {
+    throw new Error("first block is not an image");
+  }
+
+  const imageUrl = getMediaUrl(imageBlock.image);
+  if (!imageUrl) {
+    throw new Error(
+      `Image block for page ${page.id} did not include a file or external URL. ` +
+        "Make sure NOTION_TOKEN is a Notion connection token with access to the database."
+    );
+  }
+
+  return imageUrl;
+}
+
 async function getNotionStickerInfo(
   notion: Client,
   page: PageObjectResponse,
@@ -187,22 +198,11 @@ async function getNotionStickerInfo(
     return null;
   }
 
-  const blocks = await notion.blocks.children.list({
-    block_id: page.id,
-  });
-  const imageBlock = blocks.results[0];
-  if (!("type" in imageBlock)) {
-    throw new Error("first block is a partial");
-  }
-  if (imageBlock.type !== "image") {
-    throw new Error("first block is not an image");
-  }
+  const imageUrl = await getBlockImageUrl(notion, page);
 
   return {
     title,
-    count,
-    excluded,
-    imageUrl: getImageUrl(imageBlock.image),
+    url: imageUrl,
   };
 }
 
@@ -215,13 +215,21 @@ async function listNotionStickers(
 
   let response = await notion.dataSources.query({
     data_source_id: dataSourceId,
+    page_size: stickerCandidateLimit,
     result_type: "page",
   });
-  while (response.results.length > 0) {
-    stickerPages.push(...response.results.filter(isNotionPage));
-    if (response.has_more) {
+  while (
+    response.results.length > 0 &&
+    stickerPages.length < stickerCandidateLimit
+  ) {
+    const remainingPages = stickerCandidateLimit - stickerPages.length;
+    stickerPages.push(
+      ...response.results.filter(isNotionPage).slice(0, remainingPages)
+    );
+    if (response.has_more && stickerPages.length < stickerCandidateLimit) {
       response = await notion.dataSources.query({
         data_source_id: dataSourceId,
+        page_size: remainingPages,
         result_type: "page",
         start_cursor: response.next_cursor!,
       });
@@ -292,19 +300,11 @@ async function createStickerTradeSticker(
   info: NotionStickerInfo
 ): Promise<void> {
   if (stickerTradeMode === "mock") {
-    console.log(
-      `[mock] Would create sticker "${info.title}"${
-        info.imageUrl ? "" : " (no image URL available)"
-      }`
-    );
+    console.log(`[mock] Would create sticker "${info.title}"`);
     return;
   }
 
-  if (!info.imageUrl) {
-    throw new Error(`Sticker ${info.title} does not have a usable image URL`);
-  }
-
-  const imageResp = await fetch(info.imageUrl);
+  const imageResp = await fetch(info.url);
   const imageBlob = await imageResp.blob();
 
   const formData = new FormData();

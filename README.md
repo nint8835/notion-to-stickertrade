@@ -31,6 +31,9 @@ Optional for Notion reads:
 
 - `NOTION_DATA_SOURCE_ID` - skips resolving the database's first data source
 
+The Notion token must be a connection token with access to the database. The
+script reads each sticker image from the first image block on its Notion page.
+
 Required only when `STICKERTRADE_MODE=live`:
 
 - `STICKERTRADE_USERNAME`
