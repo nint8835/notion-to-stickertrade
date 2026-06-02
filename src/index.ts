@@ -1,43 +1,167 @@
-import { Client } from "@notionhq/client";
-import {
+import { Client, isFullPage } from "@notionhq/client";
+import type {
   PageObjectResponse,
   PartialPageObjectResponse,
-} from "@notionhq/client/build/src/api-endpoints";
+  QueryDataSourceResponse,
+} from "@notionhq/client";
 import dotenv from "dotenv";
 import cliProgress from "cli-progress";
-import fetch, { FormData } from "node-fetch";
 import { randomUUID } from "crypto";
 
 dotenv.config();
-
-const notion = new Client({
-  auth: process.env.NOTION_TOKEN,
-});
 
 type NotionStickerInfo = {
   title: string;
   count: number;
   excluded: boolean;
-  imageUrl: string;
+  imageUrl: string | null;
 };
 
+type StickerTradeMode = "mock" | "live";
+
+const stickerTradeMode: StickerTradeMode =
+  process.env.STICKERTRADE_MODE === "live" ? "live" : "mock";
+
+function requiredEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
+}
+
+function createNotionClient(): Client {
+  return new Client({
+    auth: requiredEnv("NOTION_TOKEN"),
+  });
+}
+
+function isNotionPage(
+  result: QueryDataSourceResponse["results"][number]
+): result is PageObjectResponse {
+  return result.object === "page" && isFullPage(result);
+}
+
+async function getNotionDataSourceId(notion: Client): Promise<string> {
+  const configuredDataSourceId = process.env.NOTION_DATA_SOURCE_ID;
+  if (configuredDataSourceId) {
+    return configuredDataSourceId;
+  }
+
+  const database = await notion.databases.retrieve({
+    database_id: requiredEnv("NOTION_DATABASE_ID"),
+  });
+
+  if (!("data_sources" in database)) {
+    throw new Error("Notion database response did not include data sources");
+  }
+
+  const dataSourceId = database.data_sources[0]?.id;
+  if (!dataSourceId) {
+    throw new Error("Notion database does not have any data sources");
+  }
+
+  return dataSourceId;
+}
+
+function getImageUrl(image: unknown): string | null {
+  if (
+    typeof image === "object" &&
+    image !== null &&
+    "type" in image &&
+    image.type === "file" &&
+    "file" in image &&
+    typeof image.file === "object" &&
+    image.file !== null &&
+    "url" in image.file &&
+    typeof image.file.url === "string"
+  ) {
+    return image.file.url;
+  }
+
+  if (
+    typeof image === "object" &&
+    image !== null &&
+    "type" in image &&
+    image.type === "external" &&
+    "external" in image &&
+    typeof image.external === "object" &&
+    image.external !== null &&
+    "url" in image.external &&
+    typeof image.external.url === "string"
+  ) {
+    return image.external.url;
+  }
+
+  return null;
+}
+
+type PageProperty = PageObjectResponse["properties"][string];
+
+function matchesPropertyId(actual: string, expected: string): boolean {
+  if (actual === expected) {
+    return true;
+  }
+
+  try {
+    return actual === decodeURIComponent(expected);
+  } catch {
+    return false;
+  }
+}
+
+function findPropertyById(page: PageObjectResponse, propertyId: string) {
+  return Object.values(page.properties).find((property) =>
+    matchesPropertyId(property.id, propertyId)
+  );
+}
+
+function getTitle(page: PageObjectResponse): string {
+  const titleProperty = Object.values(page.properties).find(
+    (property): property is PageProperty & { type: "title" } =>
+      property.type === "title"
+  );
+  if (!titleProperty) {
+    throw new Error(`Page ${page.id} does not have a title property`);
+  }
+
+  return titleProperty.title.map((text) => text.plain_text).join("");
+}
+
+function getCount(page: PageObjectResponse): number {
+  const countProperty = findPropertyById(
+    page,
+    requiredEnv("NOTION_COUNT_PROPERTY_ID")
+  );
+  if (!countProperty || countProperty.type !== "number") {
+    throw new Error(`Page ${page.id} count property is not a number`);
+  }
+  if (countProperty.number === null) {
+    throw new Error(`Page ${page.id} count property is empty`);
+  }
+
+  return countProperty.number;
+}
+
+function getExcluded(page: PageObjectResponse): boolean {
+  const excludedProperty = findPropertyById(
+    page,
+    requiredEnv("NOTION_EXCLUDE_PROPERTY_ID")
+  );
+  if (!excludedProperty || excludedProperty.type !== "checkbox") {
+    throw new Error(`Page ${page.id} exclude property is not a checkbox`);
+  }
+
+  return excludedProperty.checkbox;
+}
+
 async function getNotionStickerInfo(
-  pageId: string,
+  notion: Client,
+  page: PageObjectResponse,
   stickerTradeStickers: Set<string>,
   progressBar: cliProgress.MultiBar
 ): Promise<NotionStickerInfo | null> {
-  const titleResponse = await notion.pages.properties.retrieve({
-    page_id: pageId,
-    property_id: "title",
-  });
-  if (titleResponse.type !== "property_item") {
-    throw new Error("title is not a property item");
-  }
-  const titleObject = titleResponse.results[0];
-  if (titleObject.type !== "title") {
-    throw new Error("title is not a title");
-  }
-  const title = titleObject.title.plain_text;
+  const title = getTitle(page);
 
   if (stickerTradeStickers.has(title)) {
     progressBar.log(`Skipping ${title} because it's already in stickertrade\n`);
@@ -45,31 +169,18 @@ async function getNotionStickerInfo(
   }
 
   if (title.length > 60) {
-    throw new Error(`Sticker ${title} has too long of title (> 60 chars)`);
+    progressBar.log(`Skipping ${title} because its title is over 60 chars\n`);
+    return null;
   }
 
-  const countResponse = await notion.pages.properties.retrieve({
-    page_id: pageId,
-    property_id: process.env.NOTION_COUNT_PROPERTY_ID!,
-  });
-  if (countResponse.type !== "number") {
-    throw new Error("count is not a number");
-  }
-  const count = countResponse.number;
+  const count = getCount(page);
 
   if (count === 0) {
     progressBar.log(`Skipping ${title} because it has no stickers remaining\n`);
     return null;
   }
 
-  const excludeResponse = await notion.pages.properties.retrieve({
-    page_id: pageId,
-    property_id: process.env.NOTION_EXCLUDE_PROPERTY_ID!,
-  });
-  if (excludeResponse.type !== "checkbox") {
-    throw new Error("exclude is not a checkbox");
-  }
-  const excluded = excludeResponse.checkbox;
+  const excluded = getExcluded(page);
 
   if (excluded) {
     progressBar.log(`Skipping ${title} because it's excluded\n`);
@@ -77,7 +188,7 @@ async function getNotionStickerInfo(
   }
 
   const blocks = await notion.blocks.children.list({
-    block_id: pageId,
+    block_id: page.id,
   });
   const imageBlock = blocks.results[0];
   if (!("type" in imageBlock)) {
@@ -86,31 +197,32 @@ async function getNotionStickerInfo(
   if (imageBlock.type !== "image") {
     throw new Error("first block is not an image");
   }
-  if (imageBlock.image.type !== "file") {
-    throw new Error("image is not file");
-  }
 
   return {
     title,
-    count: count!,
+    count,
     excluded,
-    imageUrl: imageBlock.image.file.url,
+    imageUrl: getImageUrl(imageBlock.image),
   };
 }
 
 async function listNotionStickers(
   stickerTradeStickers: Set<string>
 ): Promise<NotionStickerInfo[]> {
-  const stickerPages: (PageObjectResponse | PartialPageObjectResponse)[] = [];
+  const notion = createNotionClient();
+  const dataSourceId = await getNotionDataSourceId(notion);
+  const stickerPages: PageObjectResponse[] = [];
 
-  let response = await notion.databases.query({
-    database_id: process.env.NOTION_DATABASE_ID!,
+  let response = await notion.dataSources.query({
+    data_source_id: dataSourceId,
+    result_type: "page",
   });
   while (response.results.length > 0) {
-    stickerPages.push(...response.results);
+    stickerPages.push(...response.results.filter(isNotionPage));
     if (response.has_more) {
-      response = await notion.databases.query({
-        database_id: process.env.NOTION_DATABASE_ID!,
+      response = await notion.dataSources.query({
+        data_source_id: dataSourceId,
+        result_type: "page",
         start_cursor: response.next_cursor!,
       });
     } else {
@@ -127,7 +239,8 @@ async function listNotionStickers(
   const stickerData: NotionStickerInfo[] = [];
   for (const dbPage of stickerPages) {
     const stickerInfo = await getNotionStickerInfo(
-      dbPage.id,
+      notion,
+      dbPage,
       stickerTradeStickers,
       progressBar
     );
@@ -152,9 +265,17 @@ type StickerTradeProfileResp = {
 };
 
 async function listStickerTradeStickers(): Promise<Set<string>> {
+  if (stickerTradeMode === "mock") {
+    console.log(
+      "Sticker Trade is running in mock mode; treating the remote sticker list as empty."
+    );
+    return new Set();
+  }
+
   const stickerResp = await fetch(
-    `https://stickertrade.ca/profile/${process.env
-      .STICKERTRADE_USERNAME!}?_data=routes%2Fprofile%2F%24username`
+    `https://stickertrade.ca/profile/${requiredEnv(
+      "STICKERTRADE_USERNAME"
+    )}?_data=routes%2Fprofile%2F%24username`
   );
   const stickerData = (await stickerResp.json()) as StickerTradeProfileResp;
 
@@ -170,6 +291,19 @@ async function listStickerTradeStickers(): Promise<Set<string>> {
 async function createStickerTradeSticker(
   info: NotionStickerInfo
 ): Promise<void> {
+  if (stickerTradeMode === "mock") {
+    console.log(
+      `[mock] Would create sticker "${info.title}"${
+        info.imageUrl ? "" : " (no image URL available)"
+      }`
+    );
+    return;
+  }
+
+  if (!info.imageUrl) {
+    throw new Error(`Sticker ${info.title} does not have a usable image URL`);
+  }
+
   const imageResp = await fetch(info.imageUrl);
   const imageBlob = await imageResp.blob();
 
@@ -182,7 +316,7 @@ async function createStickerTradeSticker(
     {
       method: "POST",
       headers: {
-        Cookie: `RJ_session=${process.env.STICKERTRADE_COOKIE!}`,
+        Cookie: `RJ_session=${requiredEnv("STICKERTRADE_COOKIE")}`,
       },
       body: formData,
     }
@@ -193,7 +327,8 @@ async function createStickerTradeSticker(
 }
 
 async function main() {
-  console.log("Fetching current stickers from stickertrade...");
+  console.log(`Sticker Trade mode: ${stickerTradeMode}`);
+  console.log("Fetching current stickers from Sticker Trade...");
   const stickerTradeStickers = await listStickerTradeStickers();
 
   console.log("Fetching sticker details from Notion...");
@@ -204,7 +339,7 @@ async function main() {
     return;
   }
 
-  console.log("Creating stickers on stickertrade...");
+  console.log("Creating stickers on Sticker Trade...");
   const progressBar = new cliProgress.SingleBar(
     {},
     cliProgress.Presets.shades_classic

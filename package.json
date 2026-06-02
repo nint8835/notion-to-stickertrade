@@ -1,13 +1,17 @@
 {
-  "name": "notion-sdk-project",
+  "name": "notion-to-stickertrade",
   "version": "1.0.0",
-  "description": "",
+  "description": "Mirror a Notion sticker database to Sticker Trade.",
   "main": "dist/index.js",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=18.17"
+  },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "ts-node-esm src/index.ts",
+    "start": "npm run build && node dist/index.js",
+    "start:live": "STICKERTRADE_MODE=live npm start",
+    "test": "npm run typecheck",
     "typecheck": "tsc --noEmit",
     "build": "tsc",
     "format": "prettier --write src/**/*.ts"
@@ -15,14 +19,12 @@
   "keywords": [],
   "author": "",
   "dependencies": {
-    "@notionhq/client": "^2.2.4",
+    "@notionhq/client": "^5.22.0",
     "cli-progress": "^3.12.0",
-    "dotenv": "^16.0.3",
-    "node-fetch": "^3.3.1"
+    "dotenv": "^16.0.3"
   },
   "devDependencies": {
     "@types/cli-progress": "^3.11.0",
-    "@types/dotenv": "^8.2.0",
     "@types/node": "^18.16.0",
     "prettier": "^2.8.8",
     "ts-node": "^10.9.1",
