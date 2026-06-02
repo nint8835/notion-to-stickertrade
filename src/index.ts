@@ -20,7 +20,7 @@ type StickerTradeMode = "mock" | "live";
 const stickerTradeMode: StickerTradeMode =
   process.env.STICKERTRADE_MODE === "live" ? "live" : "mock";
 const notionVersion = "2026-03-11";
-const stickerCandidateLimit = 20;
+const defaultStickerTradeApiBaseUrl = "https://stickertrade.ca/api";
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -215,21 +215,13 @@ async function listNotionStickers(
 
   let response = await notion.dataSources.query({
     data_source_id: dataSourceId,
-    page_size: stickerCandidateLimit,
     result_type: "page",
   });
-  while (
-    response.results.length > 0 &&
-    stickerPages.length < stickerCandidateLimit
-  ) {
-    const remainingPages = stickerCandidateLimit - stickerPages.length;
-    stickerPages.push(
-      ...response.results.filter(isNotionPage).slice(0, remainingPages)
-    );
-    if (response.has_more && stickerPages.length < stickerCandidateLimit) {
+  while (response.results.length > 0) {
+    stickerPages.push(...response.results.filter(isNotionPage));
+    if (response.has_more) {
       response = await notion.dataSources.query({
         data_source_id: dataSourceId,
-        page_size: remainingPages,
         result_type: "page",
         start_cursor: response.next_cursor!,
       });
@@ -262,30 +254,90 @@ async function listNotionStickers(
   return stickerData;
 }
 
-type StickerTradeProfileResp = {
+type StickerTradeUser = {
   username: string;
-  avatarUrl: string | null;
+  avatar_url: string | null;
+};
+
+type StickerTradeMeResp = {
+  user: StickerTradeUser & {
+    id: string;
+    role: string;
+    created_at: number;
+  };
+};
+
+type StickerTradeUserStickersResp = {
+  user: StickerTradeUser;
   stickers: {
     id: string;
     name: string;
-    imageUrl: string;
+    image_url: string;
+    owner: StickerTradeUser | null;
+    created_at: number;
+    updated_at: number;
   }[];
 };
 
-async function listStickerTradeStickers(): Promise<Set<string>> {
-  if (stickerTradeMode === "mock") {
-    console.log(
-      "Sticker Trade is running in mock mode; treating the remote sticker list as empty."
-    );
-    return new Set();
+type StickerTradeErrorResp = {
+  error?: string;
+  issues?: unknown;
+};
+
+function getStickerTradeApiBaseUrl(): string {
+  return (
+    process.env.STICKERTRADE_API_BASE_URL ?? defaultStickerTradeApiBaseUrl
+  ).replace(/\/$/, "");
+}
+
+function getStickerTradeAuthHeaders(): HeadersInit {
+  return {
+    Authorization: `Bearer ${requiredEnv("STICKERTRADE_API_TOKEN")}`,
+  };
+}
+
+async function getStickerTradeErrorMessage(resp: Response): Promise<string> {
+  const contentType = resp.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    const body = (await resp.json()) as StickerTradeErrorResp;
+    return body.error ?? JSON.stringify(body);
   }
 
+  return await resp.text();
+}
+
+async function getStickerTradeCurrentUser(): Promise<StickerTradeUser> {
+  const resp = await fetch(`${getStickerTradeApiBaseUrl()}/me`, {
+    headers: getStickerTradeAuthHeaders(),
+  });
+  if (!resp.ok) {
+    throw new Error(
+      `Failed to fetch Sticker Trade current user: ${await getStickerTradeErrorMessage(
+        resp
+      )}`
+    );
+  }
+
+  const data = (await resp.json()) as StickerTradeMeResp;
+  return data.user;
+}
+
+async function listStickerTradeStickers(): Promise<Set<string>> {
+  const currentUser = await getStickerTradeCurrentUser();
+  const username = encodeURIComponent(currentUser.username);
   const stickerResp = await fetch(
-    `https://stickertrade.ca/profile/${requiredEnv(
-      "STICKERTRADE_USERNAME"
-    )}?_data=routes%2Fprofile%2F%24username`
+    `${getStickerTradeApiBaseUrl()}/users/${username}/stickers`
   );
-  const stickerData = (await stickerResp.json()) as StickerTradeProfileResp;
+  if (!stickerResp.ok) {
+    throw new Error(
+      `Failed to list stickers: ${await getStickerTradeErrorMessage(
+        stickerResp
+      )}`
+    );
+  }
+
+  const stickerData =
+    (await stickerResp.json()) as StickerTradeUserStickersResp;
 
   const stickers: Set<string> = new Set();
 
@@ -311,18 +363,15 @@ async function createStickerTradeSticker(
   formData.append("name", info.title);
   formData.append("image", imageBlob, `${randomUUID()}.jpg`);
 
-  const resp = await fetch(
-    "https://stickertrade.ca/upload-sticker?_data=routes%2Fupload-sticker",
-    {
-      method: "POST",
-      headers: {
-        Cookie: `RJ_session=${requiredEnv("STICKERTRADE_COOKIE")}`,
-      },
-      body: formData,
-    }
-  );
+  const resp = await fetch(`${getStickerTradeApiBaseUrl()}/stickers`, {
+    method: "POST",
+    headers: getStickerTradeAuthHeaders(),
+    body: formData,
+  });
   if (!resp.ok) {
-    throw new Error(`Failed to create sticker: ${await resp.text()}`);
+    throw new Error(
+      `Failed to create sticker: ${await getStickerTradeErrorMessage(resp)}`
+    );
   }
 }
 
@@ -339,14 +388,23 @@ async function main() {
     return;
   }
 
-  console.log("Creating stickers on Sticker Trade...");
+  const sortedNotionStickers = [...notionStickers].sort((a, b) =>
+    a.title.localeCompare(b.title)
+  );
+
+  if (stickerTradeMode === "mock") {
+    console.log("Mock mode: logging stickers that would be created...");
+  } else {
+    console.log("Creating stickers on Sticker Trade...");
+  }
+
   const progressBar = new cliProgress.SingleBar(
     {},
     cliProgress.Presets.shades_classic
   );
-  progressBar.start(notionStickers.length, 0);
+  progressBar.start(sortedNotionStickers.length, 0);
 
-  for (const sticker of notionStickers) {
+  for (const sticker of sortedNotionStickers) {
     await createStickerTradeSticker(sticker);
     progressBar.increment();
   }

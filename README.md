@@ -1,12 +1,12 @@
 # notion-to-stickertrade
 
-`notion-to-stickertrade` is a utility script that uses the Notion API & a reverse-engineered version of [stickertrade](https://stickertrade.ca/)'s API, to mirror my existing sticker collection I track in a Notion database to [my profile on stickertrade](https://stickertrade.ca/profile/nint8835).
+`notion-to-stickertrade` is a utility script that uses the Notion API and [stickertrade](https://stickertrade.ca/)'s official JSON API, to mirror my existing sticker collection I track in a Notion database to [my profile on stickertrade](https://stickertrade.ca/profile/nint8835).
 
 ## Running
 
-By default, Sticker Trade interactions are stubbed out. The script still reads
-from Notion, but treats the Sticker Trade profile as empty and logs each sticker
-it would upload instead of writing to Sticker Trade.
+By default, Sticker Trade writes are stubbed out. The script still reads from
+Notion and Sticker Trade, but logs each sticker it would upload instead of
+writing to Sticker Trade.
 
 ```sh
 npm start
@@ -34,7 +34,16 @@ Optional for Notion reads:
 The Notion token must be a connection token with access to the database. The
 script reads each sticker image from the first image block on its Notion page.
 
-Required only when `STICKERTRADE_MODE=live`:
+Required for Sticker Trade reads and writes:
 
-- `STICKERTRADE_USERNAME`
-- `STICKERTRADE_COOKIE`
+- `STICKERTRADE_API_TOKEN`
+
+Optional for Sticker Trade:
+
+- `STICKERTRADE_MODE` - defaults to `mock`; set to `live` to create stickers
+
+- `STICKERTRADE_API_BASE_URL` - defaults to `https://stickertrade.ca/api`
+
+Create a Sticker Trade API token from `/account/profile` in Sticker Trade. Live
+mode sends it as `Authorization: Bearer ...` and uploads stickers to
+`POST /api/stickers`.
