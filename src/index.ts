@@ -7,6 +7,7 @@ import type {
 import dotenv from "dotenv";
 import cliProgress from "cli-progress";
 import { randomUUID } from "crypto";
+import sharp from "sharp";
 
 dotenv.config();
 
@@ -21,6 +22,8 @@ const stickerTradeMode: StickerTradeMode =
   process.env.STICKERTRADE_MODE === "live" ? "live" : "mock";
 const notionVersion = "2026-03-11";
 const defaultStickerTradeApiBaseUrl = "https://stickertrade.ca/api";
+const maxStickerTradeImageBytes = 10 * 1024 * 1024;
+const stickerImageMaxEdge = 1024;
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
@@ -348,6 +351,53 @@ async function listStickerTradeStickers(): Promise<Set<string>> {
   return stickers;
 }
 
+type StickerTradeImageUpload = {
+  blob: Blob;
+  filename: string;
+};
+
+async function createStickerTradeImageUpload(
+  info: NotionStickerInfo
+): Promise<StickerTradeImageUpload> {
+  const imageResp = await fetch(info.url);
+  if (!imageResp.ok) {
+    throw new Error(`Failed to fetch image for ${info.title}`);
+  }
+
+  const sourceBuffer = Buffer.from(await imageResp.arrayBuffer());
+  const qualities = [82, 72, 62, 52];
+  let lastSize = sourceBuffer.byteLength;
+
+  for (const quality of qualities) {
+    const optimized = await sharp(sourceBuffer)
+      .rotate()
+      .resize(stickerImageMaxEdge, stickerImageMaxEdge, {
+        fit: "inside",
+        withoutEnlargement: true,
+      })
+      .webp({ quality, effort: 6 })
+      .toBuffer();
+
+    lastSize = optimized.byteLength;
+    if (lastSize <= maxStickerTradeImageBytes) {
+      return {
+        blob: new Blob([new Uint8Array(optimized)], {
+          type: "image/webp",
+        }),
+        filename: `${randomUUID()}.webp`,
+      };
+    }
+  }
+
+  throw new Error(
+    `Unable to fit image for ${info.title} under ${
+      maxStickerTradeImageBytes / 1024 / 1024
+    } MB. Smallest generated image was ${(lastSize / 1024 / 1024).toFixed(
+      2
+    )} MB.`
+  );
+}
+
 async function createStickerTradeSticker(
   info: NotionStickerInfo
 ): Promise<void> {
@@ -356,12 +406,11 @@ async function createStickerTradeSticker(
     return;
   }
 
-  const imageResp = await fetch(info.url);
-  const imageBlob = await imageResp.blob();
+  const imageUpload = await createStickerTradeImageUpload(info);
 
   const formData = new FormData();
   formData.append("name", info.title);
-  formData.append("image", imageBlob, `${randomUUID()}.jpg`);
+  formData.append("image", imageUpload.blob, imageUpload.filename);
 
   const resp = await fetch(`${getStickerTradeApiBaseUrl()}/stickers`, {
     method: "POST",

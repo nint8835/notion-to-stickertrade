@@ -33,6 +33,8 @@ Optional for Notion reads:
 
 The Notion token must be a connection token with access to the database. The
 script reads each sticker image from the first image block on its Notion page.
+Images are converted to WebP and resized/compressed locally before upload so
+they fit Sticker Trade's 10 MB image limit.
 
 Required for Sticker Trade reads and writes:
 
