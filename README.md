@@ -42,10 +42,11 @@ Required for Sticker Trade reads and writes:
 
 Optional for Sticker Trade:
 
-- `STICKERTRADE_MODE` - defaults to `mock`; set to `live` to create stickers
+- `STICKERTRADE_MODE` - defaults to `mock`; set to `live` to sync stickers
 
 - `STICKERTRADE_API_BASE_URL` - defaults to `https://stickertrade.ca/api`
 
 Create a Sticker Trade API token from `/account/profile` in Sticker Trade. Live
-mode sends it as `Authorization: Bearer ...` and uploads stickers to
-`POST /api/stickers`.
+mode sends it as `Authorization: Bearer ...`, uploads stickers to
+`POST /api/stickers`, and deletes stale stickers with
+`DELETE /api/stickers/:id`.

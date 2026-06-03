@@ -16,6 +16,11 @@ type NotionStickerInfo = {
   url: string;
 };
 
+type NotionStickerPlan = {
+  stickersToCreate: NotionStickerInfo[];
+  desiredStickerNames: Set<string>;
+};
+
 type StickerTradeMode = "mock" | "live";
 
 const stickerTradeMode: StickerTradeMode =
@@ -172,46 +177,52 @@ async function getBlockImageUrl(notion: Client, page: PageObjectResponse) {
 async function getNotionStickerInfo(
   notion: Client,
   page: PageObjectResponse,
-  stickerTradeStickers: Set<string>,
+  stickerTradeStickerNames: Set<string>,
   progressBar: cliProgress.MultiBar
-): Promise<NotionStickerInfo | null> {
+): Promise<{
+  stickerInfo: NotionStickerInfo | null;
+  desiredName: string | null;
+}> {
   const title = getTitle(page);
-
-  if (stickerTradeStickers.has(title)) {
-    progressBar.log(`Skipping ${title} because it's already in stickertrade\n`);
-    return null;
-  }
 
   if (title.length > 60) {
     progressBar.log(`Skipping ${title} because its title is over 60 chars\n`);
-    return null;
+    return { stickerInfo: null, desiredName: null };
   }
 
   const count = getCount(page);
 
   if (count === 0) {
     progressBar.log(`Skipping ${title} because it has no stickers remaining\n`);
-    return null;
+    return { stickerInfo: null, desiredName: null };
   }
 
   const excluded = getExcluded(page);
 
   if (excluded) {
     progressBar.log(`Skipping ${title} because it's excluded\n`);
-    return null;
+    return { stickerInfo: null, desiredName: null };
+  }
+
+  if (stickerTradeStickerNames.has(title)) {
+    progressBar.log(`Skipping ${title} because it's already in stickertrade\n`);
+    return { stickerInfo: null, desiredName: title };
   }
 
   const imageUrl = await getBlockImageUrl(notion, page);
 
   return {
-    title,
-    url: imageUrl,
+    stickerInfo: {
+      title,
+      url: imageUrl,
+    },
+    desiredName: title,
   };
 }
 
 async function listNotionStickers(
-  stickerTradeStickers: Set<string>
-): Promise<NotionStickerInfo[]> {
+  stickerTradeStickerNames: Set<string>
+): Promise<NotionStickerPlan> {
   const notion = createNotionClient();
   const dataSourceId = await getNotionDataSourceId(notion);
   const stickerPages: PageObjectResponse[] = [];
@@ -240,13 +251,17 @@ async function listNotionStickers(
   const progressBarInst = progressBar.create(stickerPages.length, 0);
 
   const stickerData: NotionStickerInfo[] = [];
+  const desiredStickerNames = new Set<string>();
   for (const dbPage of stickerPages) {
-    const stickerInfo = await getNotionStickerInfo(
+    const { stickerInfo, desiredName } = await getNotionStickerInfo(
       notion,
       dbPage,
-      stickerTradeStickers,
+      stickerTradeStickerNames,
       progressBar
     );
+    if (desiredName) {
+      desiredStickerNames.add(desiredName);
+    }
     if (stickerInfo) {
       stickerData.push(stickerInfo);
     }
@@ -254,7 +269,10 @@ async function listNotionStickers(
   }
   progressBarInst.stop();
   progressBar.stop();
-  return stickerData;
+  return {
+    stickersToCreate: stickerData,
+    desiredStickerNames,
+  };
 }
 
 type StickerTradeUser = {
@@ -272,19 +290,21 @@ type StickerTradeMeResp = {
 
 type StickerTradeUserStickersResp = {
   user: StickerTradeUser;
-  stickers: {
-    id: string;
-    name: string;
-    image_url: string;
-    owner: StickerTradeUser | null;
-    created_at: number;
-    updated_at: number;
-  }[];
+  stickers: StickerTradeSticker[];
 };
 
 type StickerTradeErrorResp = {
   error?: string;
   issues?: unknown;
+};
+
+type StickerTradeSticker = {
+  id: string;
+  name: string;
+  image_url: string;
+  owner: StickerTradeUser | null;
+  created_at: number;
+  updated_at: number;
 };
 
 function getStickerTradeApiBaseUrl(): string {
@@ -325,7 +345,7 @@ async function getStickerTradeCurrentUser(): Promise<StickerTradeUser> {
   return data.user;
 }
 
-async function listStickerTradeStickers(): Promise<Set<string>> {
+async function listStickerTradeStickers(): Promise<StickerTradeSticker[]> {
   const currentUser = await getStickerTradeCurrentUser();
   const username = encodeURIComponent(currentUser.username);
   const stickerResp = await fetch(
@@ -342,13 +362,7 @@ async function listStickerTradeStickers(): Promise<Set<string>> {
   const stickerData =
     (await stickerResp.json()) as StickerTradeUserStickersResp;
 
-  const stickers: Set<string> = new Set();
-
-  for (const sticker of stickerData.stickers) {
-    stickers.add(sticker.name);
-  }
-
-  return stickers;
+  return stickerData.stickers;
 }
 
 type StickerTradeImageUpload = {
@@ -424,38 +438,96 @@ async function createStickerTradeSticker(
   }
 }
 
+async function deleteStickerTradeSticker(
+  sticker: StickerTradeSticker
+): Promise<void> {
+  if (stickerTradeMode === "mock") {
+    console.log(
+      `[mock] Would delete sticker "${sticker.name}" (${sticker.id})`
+    );
+    return;
+  }
+
+  const resp = await fetch(
+    `${getStickerTradeApiBaseUrl()}/stickers/${encodeURIComponent(sticker.id)}`,
+    {
+      method: "DELETE",
+      headers: getStickerTradeAuthHeaders(),
+    }
+  );
+  if (!resp.ok) {
+    throw new Error(
+      `Failed to delete sticker "${
+        sticker.name
+      }": ${await getStickerTradeErrorMessage(resp)}`
+    );
+  }
+}
+
 async function main() {
   console.log(`Sticker Trade mode: ${stickerTradeMode}`);
   console.log("Fetching current stickers from Sticker Trade...");
   const stickerTradeStickers = await listStickerTradeStickers();
+  const stickerTradeStickerNames = new Set(
+    stickerTradeStickers.map((sticker) => sticker.name)
+  );
 
   console.log("Fetching sticker details from Notion...");
-  const notionStickers = await listNotionStickers(stickerTradeStickers);
+  const notionStickerPlan = await listNotionStickers(stickerTradeStickerNames);
+  const notionStickers = notionStickerPlan.stickersToCreate;
+  const stickerTradeStickersToDelete = stickerTradeStickers.filter(
+    (sticker) => !notionStickerPlan.desiredStickerNames.has(sticker.name)
+  );
 
-  if (notionStickers.length === 0) {
-    console.log("No stickers to add");
+  if (
+    notionStickers.length === 0 &&
+    stickerTradeStickersToDelete.length === 0
+  ) {
+    console.log("No sticker changes");
     return;
   }
 
   const sortedNotionStickers = [...notionStickers].sort((a, b) =>
     a.title.localeCompare(b.title)
   );
+  const sortedStickerTradeStickersToDelete = [
+    ...stickerTradeStickersToDelete,
+  ].sort((a, b) => a.name.localeCompare(b.name));
 
   if (stickerTradeMode === "mock") {
-    console.log("Mock mode: logging stickers that would be created...");
+    console.log("Mock mode: logging sticker changes...");
   } else {
-    console.log("Creating stickers on Sticker Trade...");
+    console.log("Syncing stickers on Sticker Trade...");
   }
 
-  const progressBar = new cliProgress.SingleBar(
-    {},
-    cliProgress.Presets.shades_classic
-  );
-  progressBar.start(sortedNotionStickers.length, 0);
+  if (sortedStickerTradeStickersToDelete.length > 0) {
+    console.log("Deleting stickers from Sticker Trade...");
+    const progressBar = new cliProgress.SingleBar(
+      {},
+      cliProgress.Presets.shades_classic
+    );
+    progressBar.start(sortedStickerTradeStickersToDelete.length, 0);
 
-  for (const sticker of sortedNotionStickers) {
-    await createStickerTradeSticker(sticker);
-    progressBar.increment();
+    for (const sticker of sortedStickerTradeStickersToDelete) {
+      await deleteStickerTradeSticker(sticker);
+      progressBar.increment();
+    }
+    progressBar.stop();
+  }
+
+  if (sortedNotionStickers.length > 0) {
+    console.log("Creating stickers on Sticker Trade...");
+    const progressBar = new cliProgress.SingleBar(
+      {},
+      cliProgress.Presets.shades_classic
+    );
+    progressBar.start(sortedNotionStickers.length, 0);
+
+    for (const sticker of sortedNotionStickers) {
+      await createStickerTradeSticker(sticker);
+      progressBar.increment();
+    }
+    progressBar.stop();
   }
 }
 
