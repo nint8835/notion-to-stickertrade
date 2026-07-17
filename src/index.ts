@@ -6,10 +6,17 @@ import type {
 } from "@notionhq/client";
 import dotenv from "dotenv";
 import cliProgress from "cli-progress";
+import { execFile } from "child_process";
 import { randomUUID } from "crypto";
+import { mkdtemp, readFile, rm, writeFile } from "fs/promises";
+import { tmpdir } from "os";
+import { join } from "path";
+import { promisify } from "util";
 import sharp from "sharp";
 
 dotenv.config();
+
+const execFileAsync = promisify(execFile);
 
 type NotionStickerInfo = {
   title: string;
@@ -370,17 +377,53 @@ type StickerTradeImageUpload = {
   filename: string;
 };
 
-async function createStickerTradeImageUpload(
-  info: NotionStickerInfo
-): Promise<StickerTradeImageUpload> {
-  const imageResp = await fetch(info.url);
-  if (!imageResp.ok) {
-    throw new Error(`Failed to fetch image for ${info.title}`);
+function isUnsupportedHeifCompressionError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.message.includes(
+      "heif: Error while loading plugin: Support for this compression format has not been built in"
+    )
+  );
+}
+
+async function convertHeicToPngWithSips(
+  sourceBuffer: Buffer,
+  title: string
+): Promise<Buffer> {
+  if (process.platform !== "darwin") {
+    throw new Error(
+      `Unable to decode the HEIC image for ${title}: the sips fallback is only available on macOS.`
+    );
   }
 
-  const sourceBuffer = Buffer.from(await imageResp.arrayBuffer());
+  const tempDirectory = await mkdtemp(join(tmpdir(), "notion-sticker-"));
+  const inputPath = join(tempDirectory, "source.heic");
+  const outputPath = join(tempDirectory, "source.png");
+
+  try {
+    await writeFile(inputPath, sourceBuffer);
+    await execFileAsync("/usr/bin/sips", [
+      "-s",
+      "format",
+      "png",
+      inputPath,
+      "--out",
+      outputPath,
+    ]);
+    return await readFile(outputPath);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to convert the HEIC image for ${title}: ${message}`);
+  } finally {
+    await rm(tempDirectory, { recursive: true, force: true });
+  }
+}
+
+async function optimizeStickerTradeImage(
+  sourceBuffer: Buffer
+): Promise<{ buffer: Buffer | null; smallestSize: number }> {
   const qualities = [82, 72, 62, 52];
-  let lastSize = sourceBuffer.byteLength;
+  let smallestSize = sourceBuffer.byteLength;
 
   for (const quality of qualities) {
     const optimized = await sharp(sourceBuffer)
@@ -392,23 +435,54 @@ async function createStickerTradeImageUpload(
       .webp({ quality, effort: 6 })
       .toBuffer();
 
-    lastSize = optimized.byteLength;
-    if (lastSize <= maxStickerTradeImageBytes) {
-      return {
-        blob: new Blob([new Uint8Array(optimized)], {
-          type: "image/webp",
-        }),
-        filename: `${randomUUID()}.webp`,
-      };
+    smallestSize = optimized.byteLength;
+    if (smallestSize <= maxStickerTradeImageBytes) {
+      return { buffer: optimized, smallestSize };
     }
+  }
+
+  return { buffer: null, smallestSize };
+}
+
+async function createStickerTradeImageUpload(
+  info: NotionStickerInfo
+): Promise<StickerTradeImageUpload> {
+  const imageResp = await fetch(info.url);
+  if (!imageResp.ok) {
+    throw new Error(`Failed to fetch image for ${info.title}`);
+  }
+
+  const sourceBuffer = Buffer.from(await imageResp.arrayBuffer());
+  let result: Awaited<ReturnType<typeof optimizeStickerTradeImage>>;
+
+  try {
+    result = await optimizeStickerTradeImage(sourceBuffer);
+  } catch (error) {
+    if (!isUnsupportedHeifCompressionError(error)) {
+      throw error;
+    }
+
+    const converted = await convertHeicToPngWithSips(sourceBuffer, info.title);
+    result = await optimizeStickerTradeImage(converted);
+  }
+
+  if (result.buffer) {
+    return {
+      blob: new Blob([new Uint8Array(result.buffer)], {
+        type: "image/webp",
+      }),
+      filename: `${randomUUID()}.webp`,
+    };
   }
 
   throw new Error(
     `Unable to fit image for ${info.title} under ${
       maxStickerTradeImageBytes / 1024 / 1024
-    } MB. Smallest generated image was ${(lastSize / 1024 / 1024).toFixed(
-      2
-    )} MB.`
+    } MB. Smallest generated image was ${(
+      result.smallestSize /
+      1024 /
+      1024
+    ).toFixed(2)} MB.`
   );
 }
 
